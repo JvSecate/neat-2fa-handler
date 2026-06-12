@@ -90,7 +90,12 @@ Guest checkout uses the billing email from the checkout form and always requires
 Placeholders available in email bodies:
 
 ```text
-{site_name}, {email}, {user_login}, {code}, {ttl_minutes}, {checkout_valid_hours}
+{site_name}
+{email}
+{user_login}
+{code}
+{ttl_minutes}
+{checkout_valid_hours}
 ```
 
 ---
@@ -108,15 +113,3 @@ Supported provider labels include:
 If the Two Factor plugin is not active, the plugin still handles registration and checkout confirmation, but admin 2FA enforcement is unavailable.
 
 ---
-
-## Account Password Flow
-
-WooCommerce already provides the lost-password email flow at the My Account lost-password endpoint. The plugin keeps these WooCommerce options aligned when WooCommerce is active:
-
-```text
-woocommerce_registration_generate_username=yes
-woocommerce_registration_generate_password=no
-woocommerce_myaccount_lost_password_endpoint=lost-password
-```
-
-WooCommerce does not provide a built-in setting to require password confirmation on registration or to disable logged-in account password changes. Neat2FA Handler adds those behaviors in code. The visible password-change fieldset is removed from the account details page, and password changes submitted manually through that form are blocked server-side.

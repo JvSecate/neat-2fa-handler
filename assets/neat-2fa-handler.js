@@ -30,6 +30,13 @@
 		return document.getElementById( 'asw-checkout-code' );
 	}
 
+	function hasCheckoutSurface() {
+		return !! (
+			document.querySelector( '.wp-block-woocommerce-checkout, .wc-block-checkout, form.checkout' ) ||
+			document.querySelector( '.wc-block-components-checkout-place-order-button, #place_order, button[name="woocommerce_checkout_place_order"]' )
+		);
+	}
+
 	function checkoutCode() {
 		var field = hiddenClassicCodeField();
 		return pendingCheckoutCode || ( field ? sanitizeCode( field.value ) : '' );
@@ -50,7 +57,7 @@
 		}
 
 		var modal = document.createElement( 'div' );
-		modal.className = 'asw-modal';
+		modal.className = 'asw-modal asw-modal--checkout';
 		modal.id = 'asw-checkout-modal';
 		modal.hidden = true;
 		modal.innerHTML =
@@ -205,7 +212,7 @@
 		if ( window.jQuery ) {
 			window.jQuery( document.body ).on( 'checkout_error', function () {
 				var message = document.querySelector( '.woocommerce-error, .woocommerce-NoticeGroup-checkout .woocommerce-error' );
-				if ( message && /verification code|billing email|c[oó]digo|verifica/i.test( message.textContent ) ) {
+				if ( message && /verification code|billing email|codigo|verify|verifica/i.test( message.textContent ) ) {
 					openCheckoutModal( message.textContent.trim() );
 				}
 			} );
@@ -260,10 +267,12 @@
 	}
 
 	function init() {
-		ensureCheckoutModal();
-		initFetchGuard();
-		watchCheckoutButtons();
-		watchClassicCheckoutErrors();
+		if ( hasCheckoutSurface() ) {
+			initFetchGuard();
+			watchCheckoutButtons();
+			watchClassicCheckoutErrors();
+		}
+
 		removeAccountPasswordFields();
 
 		var accountForm = document.querySelector( 'form.woocommerce-EditAccountForm, form.edit-account' );

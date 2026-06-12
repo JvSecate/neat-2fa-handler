@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Neat2FA Handler
  * Description: Adds secure email confirmation for registration and checkout, plus admin 2FA controls integrated with the Two Factor plugin.
- * Version: 0.1.6
+ * Version: 0.2.0
  * Author: Jv Secate
  * Text Domain: neat-2fa-handler
  * Requires PHP: 7.4
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 final class ASW_Account_Security {
-	const VERSION                            = '0.1.6';
+	const VERSION                            = '0.2.0';
 	const OPTION_KEY                         = 'asw_account_security_options';
 	const REGISTRATION_CODE_NAME             = 'asw_registration_verification_code';
 	const REGISTRATION_PASSWORD_CONFIRM_NAME = 'asw_registration_password_confirm';
@@ -74,11 +74,17 @@ final class ASW_Account_Security {
 			return;
 		}
 
-		update_option( 'woocommerce_registration_generate_username', 'yes' );
-		update_option( 'woocommerce_registration_generate_password', 'no' );
+		$this->ensure_option( 'woocommerce_registration_generate_username', 'yes' );
+		$this->ensure_option( 'woocommerce_registration_generate_password', 'no' );
 
 		if ( '' === (string) get_option( 'woocommerce_myaccount_lost_password_endpoint', '' ) ) {
-			update_option( 'woocommerce_myaccount_lost_password_endpoint', 'lost-password' );
+			$this->ensure_option( 'woocommerce_myaccount_lost_password_endpoint', 'lost-password' );
+		}
+	}
+
+	private function ensure_option( $key, $value ) {
+		if ( (string) get_option( $key, '' ) !== (string) $value ) {
+			update_option( $key, $value );
 		}
 	}
 
@@ -562,6 +568,7 @@ final class ASW_Account_Security {
 			return;
 		}
 
+		// Block manual POST attempts before WooCommerce can save account password fields.
 		if ( function_exists( 'wc_add_notice' ) ) {
 			wc_add_notice( $this->password_recovery_required_message(), 'error' );
 		}
@@ -625,16 +632,6 @@ final class ASW_Account_Security {
 			return;
 		}
 
-		$result = $this->send_code( 'registration', $email );
-		if ( is_wp_error( $result ) && 'asw_cooldown' !== $result->get_error_code() ) {
-			if ( function_exists( 'wc_add_notice' ) ) {
-				wc_add_notice( $result->get_error_message(), 'error' );
-			}
-
-			wp_safe_redirect( wp_get_referer() ? wp_get_referer() : $this->account_url() );
-			exit;
-		}
-
 		$key = $this->create_pending_registration(
 			array(
 				'email'     => $email,
@@ -643,6 +640,26 @@ final class ASW_Account_Security {
 				'post_data' => $this->registration_post_data(),
 			)
 		);
+		if ( is_wp_error( $key ) ) {
+			if ( function_exists( 'wc_add_notice' ) ) {
+				wc_add_notice( $key->get_error_message(), 'error' );
+			}
+
+			wp_safe_redirect( wp_get_referer() ? wp_get_referer() : $this->account_url() );
+			exit;
+		}
+
+		$result = $this->send_code( 'registration', $email );
+		if ( is_wp_error( $result ) && 'asw_cooldown' !== $result->get_error_code() ) {
+			$this->delete_pending_registration( $key );
+
+			if ( function_exists( 'wc_add_notice' ) ) {
+				wc_add_notice( $result->get_error_message(), 'error' );
+			}
+
+			wp_safe_redirect( wp_get_referer() ? wp_get_referer() : $this->account_url() );
+			exit;
+		}
 
 		wp_safe_redirect( $this->registration_verification_url( $key ) );
 		exit;
@@ -736,13 +753,15 @@ final class ASW_Account_Security {
 		$_POST['email'] = $pending['email'];
 		$_POST['password'] = $pending['password'] ?? '';
 
-		$customer_id = wc_create_new_customer(
-			$pending['email'],
-			$pending['username'] ?? '',
-			$pending['password'] ?? ''
-		);
-
-		$_POST = $previous_post;
+		try {
+			$customer_id = wc_create_new_customer(
+				$pending['email'],
+				$pending['username'] ?? '',
+				$pending['password'] ?? ''
+			);
+		} finally {
+			$_POST = $previous_post;
+		}
 
 		return $customer_id;
 	}
@@ -768,8 +787,14 @@ final class ASW_Account_Security {
 	}
 
 	private function create_pending_registration( $payload ) {
+		// Pending registration includes the raw password briefly; never store it unencrypted.
+		$encoded = $this->encode_pending_registration( $payload );
+		if ( is_wp_error( $encoded ) ) {
+			return $encoded;
+		}
+
 		$key = wp_generate_password( 32, false, false );
-		set_transient( $this->pending_registration_key( $key ), $this->encode_pending_registration( $payload ), $this->code_ttl() );
+		set_transient( $this->pending_registration_key( $key ), $encoded, $this->code_ttl() );
 
 		return $key;
 	}
@@ -800,8 +825,17 @@ final class ASW_Account_Security {
 
 	private function encode_pending_registration( $payload ) {
 		$json = wp_json_encode( $payload );
+		if ( ! is_string( $json ) || '' === $json ) {
+			return new WP_Error( 'asw_registration_storage_failed', __( 'Registration could not be prepared securely. Please try again.', 'neat-2fa-handler' ) );
+		}
+
 		if ( function_exists( 'openssl_encrypt' ) && function_exists( 'random_bytes' ) ) {
-			$iv     = random_bytes( 16 );
+			try {
+				$iv = random_bytes( 16 );
+			} catch ( Exception $error ) {
+				return new WP_Error( 'asw_registration_storage_failed', __( 'Registration could not be prepared securely. Please try again.', 'neat-2fa-handler' ) );
+			}
+
 			$key    = hash( 'sha256', wp_salt( 'secure_auth' ), true );
 			$cipher = openssl_encrypt( $json, 'aes-256-cbc', $key, OPENSSL_RAW_DATA, $iv );
 			if ( false !== $cipher ) {
@@ -814,19 +848,12 @@ final class ASW_Account_Security {
 			}
 		}
 
-		return array(
-			'v'    => 0,
-			'data' => $payload,
-		);
+		return new WP_Error( 'asw_registration_storage_failed', __( 'Registration could not be prepared securely. Please try again.', 'neat-2fa-handler' ) );
 	}
 
 	private function decode_pending_registration( $payload ) {
 		if ( ! is_array( $payload ) || ! isset( $payload['v'], $payload['data'] ) ) {
 			return false;
-		}
-
-		if ( 0 === (int) $payload['v'] && is_array( $payload['data'] ) ) {
-			return $payload['data'];
 		}
 
 		if ( 1 !== (int) $payload['v'] || empty( $payload['mac'] ) || ! function_exists( 'openssl_decrypt' ) ) {
@@ -892,6 +919,7 @@ final class ASW_Account_Security {
 
 		$rendered = true;
 		?>
+		<?php // Classic checkout posts this hidden field after the modal collects the code. ?>
 		<input id="asw-checkout-code" type="hidden" name="<?php echo esc_attr( self::CHECKOUT_CODE_NAME ); ?>" value="">
 		<?php
 	}
@@ -1032,6 +1060,7 @@ final class ASW_Account_Security {
 			return $result;
 		}
 
+		// WooCommerce Blocks checkout bypasses classic hooks, so block the Store API before order creation.
 		$email = $this->store_api_checkout_email( $request );
 		if ( ! $email ) {
 			return $result;
