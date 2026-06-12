@@ -1,130 +1,59 @@
-.asw-email-confirmation {
-	margin: 14px 0;
-}
-
-.asw-email-confirmation .button {
-	margin-right: 8px;
-}
-
-.asw-confirmation-status {
-	display: inline-block;
-	font-size: 0.95em;
-	vertical-align: middle;
-}
-
-.asw-confirmation-status.is-success {
-	color: #0f7b45;
-}
-
-.asw-confirmation-status.is-error {
-	color: #b42318;
-}
-
-.asw-modal[hidden] {
-	display: none;
-}
-
-.asw-modal {
-	position: fixed;
-	inset: 0;
-	z-index: 999999;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: 20px;
-}
-
-.asw-modal__overlay {
-	position: absolute;
-	inset: 0;
-	background: var(--asw-overlay, #111827);
-	opacity: 0.72;
-}
-
-.asw-modal__dialog {
-	position: relative;
-	width: min(100%, 430px);
+.asw-confirmation-step {
 	box-sizing: border-box;
-	background: var(--asw-background, #ffffff);
+	margin: 18px 0;
+	padding: 18px;
+	border: 1px solid #dbe3ef;
 	border-radius: 8px;
-	padding: 26px;
-	box-shadow: 0 24px 70px rgba(17, 24, 39, 0.3);
+	background: #f8fafc;
 }
 
-.asw-modal__close {
-	position: absolute;
-	top: 12px;
-	right: 12px;
-	width: 32px;
-	height: 32px;
-	border: 0;
-	border-radius: 50%;
-	background: transparent;
-	color: #374151;
-	font-size: 26px;
-	line-height: 30px;
-	cursor: pointer;
+.asw-confirmation-step h3 {
+	margin: 0 0 8px;
+	font-size: 1rem;
+	line-height: 1.35;
+	color: #111827;
 }
 
-.asw-modal h2 {
-	margin: 0 34px 8px 0;
-	font-size: 1.35rem;
-	line-height: 1.25;
+.asw-confirmation-step p {
+	margin: 0 0 12px;
+	color: #475569;
 }
 
-.asw-modal__message,
-.asw-modal__email,
-.asw-modal__notice {
-	margin: 0 0 14px;
+.asw-confirmation-step .form-row {
+	margin-bottom: 0;
 }
 
-.asw-modal__email {
-	font-weight: 600;
-	overflow-wrap: anywhere;
-}
-
-.asw-modal__field label {
-	display: block;
-	margin-bottom: 6px;
-	font-weight: 600;
-}
-
-.asw-modal__field input {
-	width: 100%;
-	box-sizing: border-box;
-	font-size: 1.25rem;
+.asw-confirmation-step input.input-text {
+	max-width: 260px;
+	font-size: 1.15rem;
 	letter-spacing: 0.08em;
 	text-align: center;
 }
 
-.asw-modal__actions {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 10px;
-	margin-top: 16px;
+.asw-verification-page {
+	box-sizing: border-box;
+	width: min(100%, 560px);
+	margin: 48px auto;
+	padding: 28px;
+	border: 1px solid #dbe3ef;
+	border-radius: 8px;
+	background: #ffffff;
 }
 
-.asw-modal__actions .button-primary {
-	background: var(--asw-accent, #1f6feb);
-	border-color: var(--asw-accent, #1f6feb);
+.asw-verification-page h1 {
+	margin: 0 0 12px;
+	font-size: 1.65rem;
+	line-height: 1.25;
+	color: #111827;
 }
 
-.asw-modal__notice.is-success {
-	color: #0f7b45;
+.asw-verification-page p {
+	color: #475569;
 }
 
-.asw-modal__notice.is-error {
-	color: #b42318;
-}
-
-@media (max-width: 480px) {
-	.asw-modal {
-		align-items: flex-end;
-		padding: 0;
-	}
-
-	.asw-modal__dialog {
-		width: 100%;
-		border-radius: 8px 8px 0 0;
-	}
+.asw-verification-page input.input-text {
+	max-width: 280px;
+	font-size: 1.2rem;
+	letter-spacing: 0.08em;
+	text-align: center;
 }
