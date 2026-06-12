@@ -1,0 +1,130 @@
+.asw-email-confirmation {
+	margin: 14px 0;
+}
+
+.asw-email-confirmation .button {
+	margin-right: 8px;
+}
+
+.asw-confirmation-status {
+	display: inline-block;
+	font-size: 0.95em;
+	vertical-align: middle;
+}
+
+.asw-confirmation-status.is-success {
+	color: #0f7b45;
+}
+
+.asw-confirmation-status.is-error {
+	color: #b42318;
+}
+
+.asw-modal[hidden] {
+	display: none;
+}
+
+.asw-modal {
+	position: fixed;
+	inset: 0;
+	z-index: 999999;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 20px;
+}
+
+.asw-modal__overlay {
+	position: absolute;
+	inset: 0;
+	background: var(--asw-overlay, #111827);
+	opacity: 0.72;
+}
+
+.asw-modal__dialog {
+	position: relative;
+	width: min(100%, 430px);
+	box-sizing: border-box;
+	background: var(--asw-background, #ffffff);
+	border-radius: 8px;
+	padding: 26px;
+	box-shadow: 0 24px 70px rgba(17, 24, 39, 0.3);
+}
+
+.asw-modal__close {
+	position: absolute;
+	top: 12px;
+	right: 12px;
+	width: 32px;
+	height: 32px;
+	border: 0;
+	border-radius: 50%;
+	background: transparent;
+	color: #374151;
+	font-size: 26px;
+	line-height: 30px;
+	cursor: pointer;
+}
+
+.asw-modal h2 {
+	margin: 0 34px 8px 0;
+	font-size: 1.35rem;
+	line-height: 1.25;
+}
+
+.asw-modal__message,
+.asw-modal__email,
+.asw-modal__notice {
+	margin: 0 0 14px;
+}
+
+.asw-modal__email {
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.asw-modal__field label {
+	display: block;
+	margin-bottom: 6px;
+	font-weight: 600;
+}
+
+.asw-modal__field input {
+	width: 100%;
+	box-sizing: border-box;
+	font-size: 1.25rem;
+	letter-spacing: 0.08em;
+	text-align: center;
+}
+
+.asw-modal__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin-top: 16px;
+}
+
+.asw-modal__actions .button-primary {
+	background: var(--asw-accent, #1f6feb);
+	border-color: var(--asw-accent, #1f6feb);
+}
+
+.asw-modal__notice.is-success {
+	color: #0f7b45;
+}
+
+.asw-modal__notice.is-error {
+	color: #b42318;
+}
+
+@media (max-width: 480px) {
+	.asw-modal {
+		align-items: flex-end;
+		padding: 0;
+	}
+
+	.asw-modal__dialog {
+		width: 100%;
+		border-radius: 8px 8px 0 0;
+	}
+}

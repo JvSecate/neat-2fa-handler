@@ -1,0 +1,867 @@
+<?php
+/**
+ * Plugin Name: Neat2FA Handler
+ * Description: Adds secure email confirmation for registration and checkout, plus admin 2FA controls integrated with the Two Factor plugin.
+ * Version: 0.1.0
+ * Author: Jv Secate
+ * Text Domain: neat-2fa-handler
+ * Requires PHP: 7.4
+ * Requires at least: 6.0
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+final class ASW_Account_Security {
+	const VERSION                 = '0.1.0';
+	const OPTION_KEY              = 'asw_account_security_options';
+	const REGISTRATION_TOKEN_NAME = 'asw_registration_verification_token';
+	const CHECKOUT_TOKEN_NAME     = 'asw_checkout_verification_token';
+	const USER_EMAIL_CONFIRMED    = '_asw_email_confirmed_at';
+	const USER_CHECKOUT_CONFIRMED = '_asw_checkout_email_confirmed_at';
+
+	private static $instance = null;
+
+	public static function instance() {
+		if ( null === self::$instance ) {
+			self::$instance = new self();
+		}
+
+		return self::$instance;
+	}
+
+	private function __construct() {
+		add_action( 'init', array( $this, 'register_hooks' ) );
+		add_action( 'admin_menu', array( $this, 'add_admin_menu' ) );
+		add_action( 'admin_init', array( $this, 'register_settings' ) );
+		add_action( 'admin_notices', array( $this, 'admin_notices' ) );
+		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( $this, 'plugin_action_links' ) );
+
+		add_action( 'wp_ajax_asw_send_email_code', array( $this, 'ajax_send_email_code' ) );
+		add_action( 'wp_ajax_nopriv_asw_send_email_code', array( $this, 'ajax_send_email_code' ) );
+		add_action( 'wp_ajax_asw_verify_email_code', array( $this, 'ajax_verify_email_code' ) );
+		add_action( 'wp_ajax_nopriv_asw_verify_email_code', array( $this, 'ajax_verify_email_code' ) );
+
+		add_filter( 'two_factor_providers', array( $this, 'filter_two_factor_providers' ), 20 );
+		add_filter( 'two_factor_enabled_providers_for_user', array( $this, 'enforce_admin_two_factor_providers' ), 20, 2 );
+		add_filter( 'two_factor_primary_provider_for_user', array( $this, 'prefer_admin_totp_provider' ), 20, 2 );
+	}
+
+	public function register_hooks() {
+		if ( $this->enabled( 'registration_enabled' ) ) {
+			add_action( 'woocommerce_register_form', array( $this, 'render_registration_fields' ) );
+			add_filter( 'woocommerce_registration_errors', array( $this, 'validate_woocommerce_registration' ), 10, 3 );
+			add_action( 'register_form', array( $this, 'render_registration_fields' ) );
+			add_filter( 'registration_errors', array( $this, 'validate_wordpress_registration' ), 10, 3 );
+			add_action( 'user_register', array( $this, 'mark_registered_user_confirmed' ) );
+		}
+
+		if ( $this->enabled( 'checkout_enabled' ) ) {
+			add_action( 'woocommerce_after_checkout_billing_form', array( $this, 'render_checkout_fields' ) );
+			add_action( 'woocommerce_after_checkout_validation', array( $this, 'validate_checkout' ), 10, 2 );
+		}
+
+		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_frontend_assets' ) );
+		add_action( 'wp_footer', array( $this, 'render_modal_shell' ) );
+	}
+
+	private function defaults() {
+		return array(
+			'registration_enabled'       => 1,
+			'checkout_enabled'           => 1,
+			'checkout_valid_hours'       => 12,
+			'code_length'                => 8,
+			'code_ttl_minutes'           => 15,
+			'resend_cooldown_seconds'    => 60,
+			'max_attempts'               => 5,
+			'admin_2fa_enabled'          => 1,
+			'admin_2fa_roles'            => array( 'administrator', 'shop_manager' ),
+			'admin_2fa_providers'        => array( 'Two_Factor_Totp', 'Two_Factor_Email', 'Two_Factor_Backup_Codes' ),
+			'admin_2fa_force_email'      => 1,
+			'admin_2fa_prefer_totp'      => 1,
+			'registration_email_subject' => '[{site_name}] Confirm your email',
+			'registration_email_body'    => '<p>Your confirmation code is:</p><p><strong>{code}</strong></p><p>This code expires in {ttl_minutes} minutes.</p>',
+			'checkout_email_subject'     => '[{site_name}] Checkout confirmation code',
+			'checkout_email_body'        => '<p>Your checkout confirmation code is:</p><p><strong>{code}</strong></p><p>This code expires in {ttl_minutes} minutes. After confirmation, you will not be asked again for {checkout_valid_hours} hours.</p>',
+			'popup_title'                => 'Confirm your email',
+			'registration_popup_message' => 'Enter the code we sent to your email before creating your account.',
+			'checkout_popup_message'     => 'Enter the code we sent to your billing email to continue checkout.',
+			'popup_button_text'          => 'Verify code',
+			'popup_resend_text'          => 'Send code again',
+			'popup_success_text'         => 'Email confirmed.',
+			'popup_error_text'           => 'The code could not be verified.',
+			'popup_background_color'     => '#ffffff',
+			'popup_accent_color'         => '#1f6feb',
+			'popup_overlay_color'        => '#111827',
+		);
+	}
+
+	private function options() {
+		$options = get_option( self::OPTION_KEY, array() );
+		$options = is_array( $options ) ? $options : array();
+
+		return wp_parse_args( $options, $this->defaults() );
+	}
+
+	private function option( $key ) {
+		$options = $this->options();
+
+		return $options[ $key ] ?? null;
+	}
+
+	private function enabled( $key ) {
+		return (bool) $this->option( $key );
+	}
+
+	public function register_settings() {
+		register_setting(
+			'asw_account_security',
+			self::OPTION_KEY,
+			array(
+				'type'              => 'array',
+				'sanitize_callback' => array( $this, 'sanitize_options' ),
+				'default'           => $this->defaults(),
+			)
+		);
+	}
+
+	public function sanitize_options( $input ) {
+		$input    = is_array( $input ) ? $input : array();
+		$defaults = $this->defaults();
+		$output   = $defaults;
+
+		foreach ( array( 'registration_enabled', 'checkout_enabled', 'admin_2fa_enabled', 'admin_2fa_force_email', 'admin_2fa_prefer_totp' ) as $key ) {
+			$output[ $key ] = empty( $input[ $key ] ) ? 0 : 1;
+		}
+
+		$output['checkout_valid_hours']    = max( 1, min( 168, absint( $input['checkout_valid_hours'] ?? $defaults['checkout_valid_hours'] ) ) );
+		$output['code_length']             = max( 6, min( 10, absint( $input['code_length'] ?? $defaults['code_length'] ) ) );
+		$output['code_ttl_minutes']        = max( 5, min( 60, absint( $input['code_ttl_minutes'] ?? $defaults['code_ttl_minutes'] ) ) );
+		$output['resend_cooldown_seconds'] = max( 15, min( 300, absint( $input['resend_cooldown_seconds'] ?? $defaults['resend_cooldown_seconds'] ) ) );
+		$output['max_attempts']            = max( 3, min( 10, absint( $input['max_attempts'] ?? $defaults['max_attempts'] ) ) );
+
+		$posted_roles                = isset( $input['admin_2fa_roles'] ) && is_array( $input['admin_2fa_roles'] ) ? $input['admin_2fa_roles'] : array();
+		$output['admin_2fa_roles']   = array_values( array_unique( array_filter( array_map( 'sanitize_key', $posted_roles ) ) ) );
+		$posted_providers            = isset( $input['admin_2fa_providers'] ) && is_array( $input['admin_2fa_providers'] ) ? $input['admin_2fa_providers'] : array();
+		$valid_providers             = array( 'Two_Factor_Totp', 'Two_Factor_Email', 'Two_Factor_Backup_Codes' );
+		$posted_providers            = array_map( 'sanitize_text_field', wp_unslash( $posted_providers ) );
+		$output['admin_2fa_providers'] = array_values( array_intersect( $valid_providers, $posted_providers ) );
+
+		foreach ( array( 'popup_background_color', 'popup_accent_color', 'popup_overlay_color' ) as $key ) {
+			$color          = sanitize_hex_color( $input[ $key ] ?? $defaults[ $key ] );
+			$output[ $key ] = $color ? $color : $defaults[ $key ];
+		}
+
+		foreach ( array( 'registration_email_subject', 'checkout_email_subject', 'popup_title', 'registration_popup_message', 'checkout_popup_message', 'popup_button_text', 'popup_resend_text', 'popup_success_text', 'popup_error_text' ) as $key ) {
+			$output[ $key ] = sanitize_text_field( $input[ $key ] ?? $defaults[ $key ] );
+		}
+
+		foreach ( array( 'registration_email_body', 'checkout_email_body' ) as $key ) {
+			$output[ $key ] = wp_kses_post( $input[ $key ] ?? $defaults[ $key ] );
+		}
+
+		return $output;
+	}
+
+	public function add_admin_menu() {
+		$callback = array( $this, 'render_settings_page' );
+
+		if ( class_exists( 'WooCommerce' ) ) {
+			add_submenu_page(
+				'woocommerce',
+				__( 'Neat2FA Handler', 'neat-2fa-handler' ),
+				__( 'Neat2FA Handler', 'neat-2fa-handler' ),
+				'manage_options',
+				'neat-2fa-handler',
+				$callback
+			);
+			return;
+		}
+
+		add_options_page(
+			__( 'Neat2FA Handler', 'neat-2fa-handler' ),
+			__( 'Neat2FA Handler', 'neat-2fa-handler' ),
+			'manage_options',
+			'neat-2fa-handler',
+			$callback
+		);
+	}
+
+	public function render_settings_page() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		$options   = $this->options();
+		$roles     = wp_roles()->roles;
+		$providers = $this->provider_labels();
+		?>
+		<div class="wrap asw-admin">
+			<h1><?php esc_html_e( 'Neat2FA Handler', 'neat-2fa-handler' ); ?></h1>
+			<p><?php esc_html_e( 'Configure registration email confirmation, timed checkout confirmation, and Two Factor enforcement for admin roles.', 'neat-2fa-handler' ); ?></p>
+
+			<?php $this->render_two_factor_status_notice(); ?>
+
+			<form method="post" action="options.php">
+				<?php settings_fields( 'asw_account_security' ); ?>
+
+				<h2><?php esc_html_e( 'Email Confirmation', 'neat-2fa-handler' ); ?></h2>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Flows', 'neat-2fa-handler' ); ?></th>
+						<td>
+							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[registration_enabled]" value="1" <?php checked( $options['registration_enabled'] ); ?>> <?php esc_html_e( 'Require code before account registration', 'neat-2fa-handler' ); ?></label><br>
+							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[checkout_enabled]" value="1" <?php checked( $options['checkout_enabled'] ); ?>> <?php esc_html_e( 'Require code at checkout', 'neat-2fa-handler' ); ?></label>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="asw_checkout_valid_hours"><?php esc_html_e( 'Checkout confirmation window', 'neat-2fa-handler' ); ?></label></th>
+						<td><input id="asw_checkout_valid_hours" type="number" min="1" max="168" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[checkout_valid_hours]" value="<?php echo esc_attr( $options['checkout_valid_hours'] ); ?>"> <?php esc_html_e( 'hours', 'neat-2fa-handler' ); ?></td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Code controls', 'neat-2fa-handler' ); ?></th>
+						<td>
+							<label><?php esc_html_e( 'Digits', 'neat-2fa-handler' ); ?> <input type="number" min="6" max="10" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[code_length]" value="<?php echo esc_attr( $options['code_length'] ); ?>"></label>
+							<label><?php esc_html_e( 'Expiry minutes', 'neat-2fa-handler' ); ?> <input type="number" min="5" max="60" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[code_ttl_minutes]" value="<?php echo esc_attr( $options['code_ttl_minutes'] ); ?>"></label>
+							<label><?php esc_html_e( 'Resend cooldown seconds', 'neat-2fa-handler' ); ?> <input type="number" min="15" max="300" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[resend_cooldown_seconds]" value="<?php echo esc_attr( $options['resend_cooldown_seconds'] ); ?>"></label>
+							<label><?php esc_html_e( 'Max attempts', 'neat-2fa-handler' ); ?> <input type="number" min="3" max="10" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[max_attempts]" value="<?php echo esc_attr( $options['max_attempts'] ); ?>"></label>
+						</td>
+					</tr>
+				</table>
+
+				<h2><?php esc_html_e( 'Email Templates', 'neat-2fa-handler' ); ?></h2>
+				<p class="description"><?php esc_html_e( 'Placeholders: {site_name}, {email}, {user_login}, {code}, {ttl_minutes}, {checkout_valid_hours}.', 'neat-2fa-handler' ); ?></p>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><label for="asw_registration_email_subject"><?php esc_html_e( 'Registration subject', 'neat-2fa-handler' ); ?></label></th>
+						<td><input id="asw_registration_email_subject" class="large-text" type="text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[registration_email_subject]" value="<?php echo esc_attr( $options['registration_email_subject'] ); ?>"></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="asw_registration_email_body"><?php esc_html_e( 'Registration email', 'neat-2fa-handler' ); ?></label></th>
+						<td><textarea id="asw_registration_email_body" class="large-text code" rows="6" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[registration_email_body]"><?php echo esc_textarea( $options['registration_email_body'] ); ?></textarea></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="asw_checkout_email_subject"><?php esc_html_e( 'Checkout subject', 'neat-2fa-handler' ); ?></label></th>
+						<td><input id="asw_checkout_email_subject" class="large-text" type="text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[checkout_email_subject]" value="<?php echo esc_attr( $options['checkout_email_subject'] ); ?>"></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="asw_checkout_email_body"><?php esc_html_e( 'Checkout email', 'neat-2fa-handler' ); ?></label></th>
+						<td><textarea id="asw_checkout_email_body" class="large-text code" rows="6" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[checkout_email_body]"><?php echo esc_textarea( $options['checkout_email_body'] ); ?></textarea></td>
+					</tr>
+				</table>
+
+				<h2><?php esc_html_e( 'Code Popup', 'neat-2fa-handler' ); ?></h2>
+				<table class="form-table" role="presentation">
+					<?php
+					$this->text_row( 'popup_title', __( 'Title', 'neat-2fa-handler' ), $options );
+					$this->text_row( 'registration_popup_message', __( 'Registration message', 'neat-2fa-handler' ), $options );
+					$this->text_row( 'checkout_popup_message', __( 'Checkout message', 'neat-2fa-handler' ), $options );
+					$this->text_row( 'popup_button_text', __( 'Verify button', 'neat-2fa-handler' ), $options );
+					$this->text_row( 'popup_resend_text', __( 'Resend text', 'neat-2fa-handler' ), $options );
+					$this->text_row( 'popup_success_text', __( 'Success text', 'neat-2fa-handler' ), $options );
+					$this->text_row( 'popup_error_text', __( 'Error text', 'neat-2fa-handler' ), $options );
+					$this->color_row( 'popup_background_color', __( 'Popup background', 'neat-2fa-handler' ), $options );
+					$this->color_row( 'popup_accent_color', __( 'Accent color', 'neat-2fa-handler' ), $options );
+					$this->color_row( 'popup_overlay_color', __( 'Overlay color', 'neat-2fa-handler' ), $options );
+					?>
+				</table>
+
+				<h2><?php esc_html_e( 'Admin Two-Factor', 'neat-2fa-handler' ); ?></h2>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Enforcement', 'neat-2fa-handler' ); ?></th>
+						<td>
+							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[admin_2fa_enabled]" value="1" <?php checked( $options['admin_2fa_enabled'] ); ?>> <?php esc_html_e( 'Require Two Factor for selected roles', 'neat-2fa-handler' ); ?></label><br>
+							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[admin_2fa_force_email]" value="1" <?php checked( $options['admin_2fa_force_email'] ); ?>> <?php esc_html_e( 'Use email code as a secure fallback for protected roles', 'neat-2fa-handler' ); ?></label><br>
+							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[admin_2fa_prefer_totp]" value="1" <?php checked( $options['admin_2fa_prefer_totp'] ); ?>> <?php esc_html_e( 'Prefer authenticator app when configured', 'neat-2fa-handler' ); ?></label>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Protected roles', 'neat-2fa-handler' ); ?></th>
+						<td>
+							<?php foreach ( $roles as $role_key => $role ) : ?>
+								<label style="display:block"><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[admin_2fa_roles][]" value="<?php echo esc_attr( $role_key ); ?>" <?php checked( in_array( $role_key, $options['admin_2fa_roles'], true ) ); ?>> <?php echo esc_html( translate_user_role( $role['name'] ) ); ?></label>
+							<?php endforeach; ?>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Allowed Two Factor methods', 'neat-2fa-handler' ); ?></th>
+						<td>
+							<?php foreach ( $providers as $provider_key => $provider_label ) : ?>
+								<label style="display:block"><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[admin_2fa_providers][]" value="<?php echo esc_attr( $provider_key ); ?>" <?php checked( in_array( $provider_key, $options['admin_2fa_providers'], true ) ); ?>> <?php echo esc_html( $provider_label ); ?></label>
+							<?php endforeach; ?>
+						</td>
+					</tr>
+				</table>
+
+				<?php $this->render_admin_2fa_status_table(); ?>
+
+				<?php submit_button( __( 'Save security settings', 'neat-2fa-handler' ) ); ?>
+			</form>
+		</div>
+		<?php
+	}
+
+	private function text_row( $key, $label, $options ) {
+		?>
+		<tr>
+			<th scope="row"><label for="asw_<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $label ); ?></label></th>
+			<td><input id="asw_<?php echo esc_attr( $key ); ?>" class="large-text" type="text" name="<?php echo esc_attr( self::OPTION_KEY . '[' . $key . ']' ); ?>" value="<?php echo esc_attr( $options[ $key ] ); ?>"></td>
+		</tr>
+		<?php
+	}
+
+	private function color_row( $key, $label, $options ) {
+		?>
+		<tr>
+			<th scope="row"><label for="asw_<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $label ); ?></label></th>
+			<td><input id="asw_<?php echo esc_attr( $key ); ?>" type="color" name="<?php echo esc_attr( self::OPTION_KEY . '[' . $key . ']' ); ?>" value="<?php echo esc_attr( $options[ $key ] ); ?>"></td>
+		</tr>
+		<?php
+	}
+
+	private function provider_labels() {
+		$labels = array(
+			'Two_Factor_Totp'         => __( 'Authenticator app (TOTP)', 'neat-2fa-handler' ),
+			'Two_Factor_Email'        => __( 'Email code', 'neat-2fa-handler' ),
+			'Two_Factor_Backup_Codes' => __( 'Backup codes', 'neat-2fa-handler' ),
+		);
+
+		if ( class_exists( 'Two_Factor_Core' ) && method_exists( 'Two_Factor_Core', 'get_providers' ) ) {
+			foreach ( Two_Factor_Core::get_providers() as $key => $provider ) {
+				if ( method_exists( $provider, 'get_label' ) ) {
+					$labels[ $key ] = $provider->get_label();
+				}
+			}
+		}
+
+		unset( $labels['Two_Factor_Dummy'] );
+
+		return $labels;
+	}
+
+	private function render_admin_2fa_status_table() {
+		if ( ! class_exists( 'Two_Factor_Core' ) ) {
+			return;
+		}
+
+		$roles = (array) $this->option( 'admin_2fa_roles' );
+		if ( empty( $roles ) ) {
+			return;
+		}
+
+		$users = get_users(
+			array(
+				'role__in' => $roles,
+				'number'   => 50,
+				'orderby'  => 'display_name',
+				'order'    => 'ASC',
+			)
+		);
+
+		$labels = $this->provider_labels();
+		?>
+		<h3><?php esc_html_e( 'Protected Users', 'neat-2fa-handler' ); ?></h3>
+		<table class="widefat striped">
+			<thead>
+				<tr>
+					<th><?php esc_html_e( 'User', 'neat-2fa-handler' ); ?></th>
+					<th><?php esc_html_e( 'Roles', 'neat-2fa-handler' ); ?></th>
+					<th><?php esc_html_e( 'Enabled methods', 'neat-2fa-handler' ); ?></th>
+					<th><?php esc_html_e( 'Login protection', 'neat-2fa-handler' ); ?></th>
+				</tr>
+			</thead>
+			<tbody>
+				<?php if ( empty( $users ) ) : ?>
+					<tr><td colspan="4"><?php esc_html_e( 'No users found for the selected roles.', 'neat-2fa-handler' ); ?></td></tr>
+				<?php else : ?>
+					<?php foreach ( $users as $user ) : ?>
+						<?php
+						$enabled   = Two_Factor_Core::get_enabled_providers_for_user( $user->ID );
+						$available = Two_Factor_Core::get_available_providers_for_user( $user->ID );
+						$names     = array();
+						foreach ( $enabled as $provider_key ) {
+							$names[] = $labels[ $provider_key ] ?? $provider_key;
+						}
+						$is_protected = is_array( $available ) && ! empty( $available );
+						?>
+						<tr>
+							<td><a href="<?php echo esc_url( get_edit_user_link( $user->ID ) ); ?>"><?php echo esc_html( $user->display_name ); ?></a><br><code><?php echo esc_html( $user->user_email ); ?></code></td>
+							<td><?php echo esc_html( implode( ', ', $user->roles ) ); ?></td>
+							<td><?php echo esc_html( $names ? implode( ', ', $names ) : __( 'None', 'neat-2fa-handler' ) ); ?></td>
+							<td><?php echo esc_html( $is_protected ? __( 'Active', 'neat-2fa-handler' ) : __( 'Needs setup', 'neat-2fa-handler' ) ); ?></td>
+						</tr>
+					<?php endforeach; ?>
+				<?php endif; ?>
+			</tbody>
+		</table>
+		<?php
+	}
+
+	public function plugin_action_links( $links ) {
+		$url = admin_url( class_exists( 'WooCommerce' ) ? 'admin.php?page=neat-2fa-handler' : 'options-general.php?page=neat-2fa-handler' );
+		array_unshift( $links, '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Settings', 'neat-2fa-handler' ) . '</a>' );
+
+		return $links;
+	}
+
+	public function admin_notices() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		if ( ! class_exists( 'Two_Factor_Core' ) ) {
+			echo '<div class="notice notice-warning"><p>' . esc_html__( 'Neat2FA Handler is active, but the Two Factor plugin is not active. Registration and checkout email confirmation will still work; admin 2FA controls need Two Factor enabled.', 'neat-2fa-handler' ) . '</p></div>';
+		}
+	}
+
+	private function render_two_factor_status_notice() {
+		if ( class_exists( 'Two_Factor_Core' ) ) {
+			echo '<div class="notice notice-success inline"><p>' . esc_html__( 'Two Factor integration found. Authenticator app and email-code login protection can be managed here without modifying the Two Factor plugin.', 'neat-2fa-handler' ) . '</p></div>';
+			return;
+		}
+
+		echo '<div class="notice notice-warning inline"><p>' . esc_html__( 'Two Factor integration was not found. Activate the Two Factor plugin to enable admin 2FA enforcement.', 'neat-2fa-handler' ) . '</p></div>';
+	}
+
+	public function enqueue_frontend_assets() {
+		if ( ! $this->should_load_frontend_assets() ) {
+			return;
+		}
+
+		$options = $this->options();
+		wp_enqueue_style( 'neat-2fa-handler', plugins_url( 'assets/neat-2fa-handler.css', __FILE__ ), array(), self::VERSION );
+		wp_enqueue_script( 'neat-2fa-handler', plugins_url( 'assets/neat-2fa-handler.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+		wp_localize_script(
+			'neat-2fa-handler',
+			'ASWAccountSecurity',
+			array(
+				'ajaxUrl'  => admin_url( 'admin-ajax.php' ),
+				'nonce'    => wp_create_nonce( 'asw_public' ),
+				'codeSize' => (int) $options['code_length'],
+				'contexts' => array(
+					'registration' => array(
+						'title'   => $options['popup_title'],
+						'message' => $options['registration_popup_message'],
+					),
+					'checkout'     => array(
+						'title'   => $options['popup_title'],
+						'message' => $options['checkout_popup_message'],
+					),
+				),
+				'text'     => array(
+					'button'       => $options['popup_button_text'],
+					'resend'       => $options['popup_resend_text'],
+					'success'      => $options['popup_success_text'],
+					'error'        => $options['popup_error_text'],
+					'sending'      => __( 'Sending code...', 'neat-2fa-handler' ),
+					'verifying'    => __( 'Checking code...', 'neat-2fa-handler' ),
+					'emailMissing' => __( 'Enter your email address first.', 'neat-2fa-handler' ),
+				),
+				'colors'   => array(
+					'background' => $options['popup_background_color'],
+					'accent'     => $options['popup_accent_color'],
+					'overlay'    => $options['popup_overlay_color'],
+				),
+			)
+		);
+	}
+
+	private function should_load_frontend_assets() {
+		if ( $this->enabled( 'registration_enabled' ) && function_exists( 'is_account_page' ) && is_account_page() ) {
+			return true;
+		}
+
+		if ( $this->enabled( 'checkout_enabled' ) && function_exists( 'is_checkout' ) && is_checkout() ) {
+			return true;
+		}
+
+		global $pagenow;
+		return $this->enabled( 'registration_enabled' ) && 'wp-login.php' === $pagenow;
+	}
+
+	public function render_registration_fields() {
+		?>
+		<p class="form-row asw-email-confirmation asw-registration-confirmation">
+			<input type="hidden" name="<?php echo esc_attr( self::REGISTRATION_TOKEN_NAME ); ?>" value="">
+			<button type="button" class="button asw-open-code-modal" data-asw-context="registration"><?php esc_html_e( 'Confirm email', 'neat-2fa-handler' ); ?></button>
+			<span class="asw-confirmation-status" aria-live="polite"></span>
+		</p>
+		<?php
+	}
+
+	public function render_checkout_fields() {
+		?>
+		<div class="asw-email-confirmation asw-checkout-confirmation">
+			<input type="hidden" name="<?php echo esc_attr( self::CHECKOUT_TOKEN_NAME ); ?>" value="">
+			<button type="button" class="button asw-open-code-modal" data-asw-context="checkout"><?php esc_html_e( 'Confirm billing email', 'neat-2fa-handler' ); ?></button>
+			<span class="asw-confirmation-status" aria-live="polite"></span>
+		</div>
+		<?php
+	}
+
+	public function render_modal_shell() {
+		if ( ! $this->should_load_frontend_assets() ) {
+			return;
+		}
+		?>
+		<div class="asw-modal" id="asw-code-modal" hidden>
+			<div class="asw-modal__overlay" data-asw-close></div>
+			<div class="asw-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="asw-modal-title">
+				<button type="button" class="asw-modal__close" data-asw-close aria-label="<?php esc_attr_e( 'Close', 'neat-2fa-handler' ); ?>">&times;</button>
+				<h2 id="asw-modal-title"></h2>
+				<p class="asw-modal__message"></p>
+				<p class="asw-modal__email"></p>
+				<div class="asw-modal__field">
+					<label for="asw-code-input"><?php esc_html_e( 'Verification code', 'neat-2fa-handler' ); ?></label>
+					<input id="asw-code-input" type="text" inputmode="numeric" pattern="[0-9 ]*" autocomplete="one-time-code">
+				</div>
+				<div class="asw-modal__actions">
+					<button type="button" class="button button-primary asw-verify-code"></button>
+					<button type="button" class="button asw-resend-code"></button>
+				</div>
+				<p class="asw-modal__notice" aria-live="polite"></p>
+			</div>
+		</div>
+		<?php
+	}
+
+	public function ajax_send_email_code() {
+		check_ajax_referer( 'asw_public', 'nonce' );
+
+		$context = $this->sanitize_context( $_POST['context'] ?? '' );
+		$email   = $this->sanitize_email_from_request( $_POST['email'] ?? '' );
+
+		if ( ! $context || ! $email ) {
+			wp_send_json_error( array( 'message' => __( 'A valid email address is required.', 'neat-2fa-handler' ) ), 400 );
+		}
+
+		if ( $this->has_recent_confirmation( $context, $email ) ) {
+			wp_send_json_success(
+				array(
+					'alreadyVerified' => true,
+					'token'           => $this->create_verification_token( $context, $email ),
+					'message'         => $this->option( 'popup_success_text' ),
+				)
+			);
+		}
+
+		$result = $this->send_code( $context, $email );
+		if ( is_wp_error( $result ) ) {
+			wp_send_json_error( array( 'message' => $result->get_error_message() ), 429 );
+		}
+
+		wp_send_json_success( array( 'message' => __( 'Confirmation code sent.', 'neat-2fa-handler' ) ) );
+	}
+
+	public function ajax_verify_email_code() {
+		check_ajax_referer( 'asw_public', 'nonce' );
+
+		$context = $this->sanitize_context( $_POST['context'] ?? '' );
+		$email   = $this->sanitize_email_from_request( $_POST['email'] ?? '' );
+		$code    = preg_replace( '/[^0-9]/', '', wp_unslash( $_POST['code'] ?? '' ) );
+
+		if ( ! $context || ! $email || ! $code ) {
+			wp_send_json_error( array( 'message' => $this->option( 'popup_error_text' ) ), 400 );
+		}
+
+		$result = $this->validate_code( $context, $email, $code );
+		if ( is_wp_error( $result ) ) {
+			wp_send_json_error( array( 'message' => $result->get_error_message() ), 400 );
+		}
+
+		$this->store_recent_confirmation( $context, $email );
+
+		wp_send_json_success(
+			array(
+				'token'   => $this->create_verification_token( $context, $email ),
+				'message' => $this->option( 'popup_success_text' ),
+			)
+		);
+	}
+
+	private function send_code( $context, $email ) {
+		$key          = $this->email_key( $context, $email );
+		$cooldown_key = 'asw_code_cooldown_' . $key;
+
+		if ( get_transient( $cooldown_key ) ) {
+			return new WP_Error( 'asw_cooldown', __( 'Please wait before requesting another code.', 'neat-2fa-handler' ) );
+		}
+
+		$code = $this->generate_code();
+		set_transient(
+			'asw_email_code_' . $key,
+			array(
+				'hash'       => wp_hash( $code ),
+				'created_at' => time(),
+				'attempts'   => 0,
+			),
+			$this->code_ttl()
+		);
+		set_transient( $cooldown_key, 1, (int) $this->option( 'resend_cooldown_seconds' ) );
+
+		$subject = $this->parse_template( $this->option( $context . '_email_subject' ), $context, $email, $code );
+		$body    = $this->parse_template( $this->option( $context . '_email_body' ), $context, $email, $code );
+
+		add_filter( 'wp_mail_content_type', array( $this, 'mail_content_type' ) );
+		$sent = wp_mail( $email, wp_strip_all_tags( $subject ), $body );
+		remove_filter( 'wp_mail_content_type', array( $this, 'mail_content_type' ) );
+
+		if ( ! $sent ) {
+			delete_transient( 'asw_email_code_' . $key );
+			delete_transient( $cooldown_key );
+			return new WP_Error( 'asw_mail_failed', __( 'The confirmation email could not be sent.', 'neat-2fa-handler' ) );
+		}
+
+		return true;
+	}
+
+	public function mail_content_type() {
+		return 'text/html';
+	}
+
+	private function validate_code( $context, $email, $code ) {
+		$key   = $this->email_key( $context, $email );
+		$store = get_transient( 'asw_email_code_' . $key );
+
+		if ( ! is_array( $store ) || empty( $store['hash'] ) ) {
+			return new WP_Error( 'asw_code_expired', __( 'The code expired. Please request a new code.', 'neat-2fa-handler' ) );
+		}
+
+		$attempts = absint( $store['attempts'] ?? 0 ) + 1;
+		if ( $attempts > (int) $this->option( 'max_attempts' ) ) {
+			delete_transient( 'asw_email_code_' . $key );
+			return new WP_Error( 'asw_too_many_attempts', __( 'Too many incorrect attempts. Please request a new code.', 'neat-2fa-handler' ) );
+		}
+
+		if ( ! hash_equals( $store['hash'], wp_hash( $code ) ) ) {
+			$store['attempts'] = $attempts;
+			set_transient( 'asw_email_code_' . $key, $store, max( 1, $this->code_ttl() - ( time() - absint( $store['created_at'] ?? time() ) ) ) );
+			return new WP_Error( 'asw_invalid_code', $this->option( 'popup_error_text' ) );
+		}
+
+		delete_transient( 'asw_email_code_' . $key );
+
+		return true;
+	}
+
+	private function generate_code() {
+		$length = (int) $this->option( 'code_length' );
+		if ( class_exists( 'Two_Factor_Provider' ) && method_exists( 'Two_Factor_Provider', 'get_code' ) ) {
+			return Two_Factor_Provider::get_code( $length );
+		}
+
+		$code = (string) wp_rand( 1, 9 );
+		for ( $i = 1; $i < $length; $i++ ) {
+			$code .= (string) wp_rand( 0, 9 );
+		}
+
+		return $code;
+	}
+
+	private function code_ttl() {
+		return (int) $this->option( 'code_ttl_minutes' ) * MINUTE_IN_SECONDS;
+	}
+
+	private function parse_template( $template, $context, $email, $code ) {
+		$user = get_user_by( 'email', $email );
+
+		$replacements = array(
+			'{site_name}'            => wp_specialchars_decode( get_option( 'blogname' ), ENT_QUOTES ),
+			'{email}'                => $email,
+			'{user_login}'           => $user ? $user->user_login : '',
+			'{code}'                 => $code,
+			'{ttl_minutes}'          => (string) $this->option( 'code_ttl_minutes' ),
+			'{checkout_valid_hours}' => (string) $this->option( 'checkout_valid_hours' ),
+			'{context}'              => $context,
+		);
+
+		return strtr( (string) $template, $replacements );
+	}
+
+	public function validate_woocommerce_registration( $errors, $username, $email ) {
+		$email = $this->sanitize_email_from_request( $email );
+		if ( ! $this->is_token_or_recent_confirmation_valid( 'registration', $email, $_POST[ self::REGISTRATION_TOKEN_NAME ] ?? '' ) ) {
+			$errors->add( 'asw_email_confirmation_required', __( 'Please confirm your email address with the code we sent before creating your account.', 'neat-2fa-handler' ) );
+		}
+
+		return $errors;
+	}
+
+	public function validate_wordpress_registration( $errors, $sanitized_user_login, $user_email ) {
+		$email = $this->sanitize_email_from_request( $user_email );
+		if ( ! $this->is_token_or_recent_confirmation_valid( 'registration', $email, $_POST[ self::REGISTRATION_TOKEN_NAME ] ?? '' ) ) {
+			$errors->add( 'asw_email_confirmation_required', __( 'Please confirm your email address with the code we sent before creating your account.', 'neat-2fa-handler' ) );
+		}
+
+		return $errors;
+	}
+
+	public function validate_checkout( $posted, $errors ) {
+		$email = $this->sanitize_email_from_request( $posted['billing_email'] ?? '' );
+		if ( $email && $this->is_token_or_recent_confirmation_valid( 'checkout', $email, $_POST[ self::CHECKOUT_TOKEN_NAME ] ?? '' ) ) {
+			return;
+		}
+
+		$errors->add( 'asw_checkout_confirmation_required', __( 'Please confirm your billing email address with the code we sent before placing your order.', 'neat-2fa-handler' ) );
+	}
+
+	public function mark_registered_user_confirmed( $user_id ) {
+		$user = get_user_by( 'id', $user_id );
+		if ( ! $user || empty( $user->user_email ) ) {
+			return;
+		}
+
+		if ( $this->is_token_or_recent_confirmation_valid( 'registration', $user->user_email, $_POST[ self::REGISTRATION_TOKEN_NAME ] ?? '' ) ) {
+			update_user_meta( $user_id, self::USER_EMAIL_CONFIRMED, time() );
+		}
+	}
+
+	private function is_token_or_recent_confirmation_valid( $context, $email, $token ) {
+		if ( ! $context || ! $email ) {
+			return false;
+		}
+
+		if ( $this->has_recent_confirmation( $context, $email ) ) {
+			return true;
+		}
+
+		return $this->validate_verification_token( $context, $email, $token );
+	}
+
+	private function store_recent_confirmation( $context, $email ) {
+		$ttl = 'checkout' === $context ? (int) $this->option( 'checkout_valid_hours' ) * HOUR_IN_SECONDS : HOUR_IN_SECONDS;
+		set_transient( 'asw_verified_' . $this->email_key( $context, $email ), time(), $ttl );
+
+		$user = get_user_by( 'email', $email );
+		if ( $user ) {
+			update_user_meta( $user->ID, 'checkout' === $context ? self::USER_CHECKOUT_CONFIRMED : self::USER_EMAIL_CONFIRMED, time() );
+		}
+	}
+
+	private function has_recent_confirmation( $context, $email ) {
+		if ( ! $context || ! $email ) {
+			return false;
+		}
+
+		return (bool) get_transient( 'asw_verified_' . $this->email_key( $context, $email ) );
+	}
+
+	private function create_verification_token( $context, $email ) {
+		$payload = array(
+			'context' => $context,
+			'email'   => strtolower( $email ),
+			'exp'     => time() + ( 'checkout' === $context ? (int) $this->option( 'checkout_valid_hours' ) * HOUR_IN_SECONDS : HOUR_IN_SECONDS ),
+		);
+		$encoded = $this->base64url_encode( wp_json_encode( $payload ) );
+		$sign    = hash_hmac( 'sha256', $encoded, wp_salt( 'secure_auth' ) );
+
+		return $encoded . '.' . $sign;
+	}
+
+	private function validate_verification_token( $context, $email, $token ) {
+		$token = is_string( $token ) ? sanitize_text_field( wp_unslash( $token ) ) : '';
+		if ( false === strpos( $token, '.' ) ) {
+			return false;
+		}
+
+		list( $encoded, $signature ) = explode( '.', $token, 2 );
+		$expected = hash_hmac( 'sha256', $encoded, wp_salt( 'secure_auth' ) );
+		if ( ! hash_equals( $expected, $signature ) ) {
+			return false;
+		}
+
+		$payload = json_decode( $this->base64url_decode( $encoded ), true );
+		if ( ! is_array( $payload ) ) {
+			return false;
+		}
+
+		return $context === ( $payload['context'] ?? '' )
+			&& strtolower( $email ) === ( $payload['email'] ?? '' )
+			&& time() <= absint( $payload['exp'] ?? 0 );
+	}
+
+	private function email_key( $context, $email ) {
+		return hash_hmac( 'sha256', $context . '|' . strtolower( $email ), wp_salt( 'auth' ) );
+	}
+
+	private function sanitize_context( $context ) {
+		$context = sanitize_key( wp_unslash( $context ) );
+		if ( in_array( $context, array( 'registration', 'checkout' ), true ) ) {
+			return $context;
+		}
+
+		return '';
+	}
+
+	private function sanitize_email_from_request( $email ) {
+		$email = sanitize_email( wp_unslash( $email ) );
+
+		return is_email( $email ) ? $email : '';
+	}
+
+	private function base64url_encode( $value ) {
+		return rtrim( strtr( base64_encode( $value ), '+/', '-_' ), '=' );
+	}
+
+	private function base64url_decode( $value ) {
+		return base64_decode( strtr( $value, '-_', '+/' ) );
+	}
+
+	public function filter_two_factor_providers( $providers ) {
+		unset( $providers['Two_Factor_Dummy'] );
+
+		if ( ! $this->enabled( 'admin_2fa_enabled' ) ) {
+			return $providers;
+		}
+
+		$allowed = (array) $this->option( 'admin_2fa_providers' );
+		if ( empty( $allowed ) ) {
+			return $providers;
+		}
+
+		return array_intersect_key( $providers, array_flip( $allowed ) );
+	}
+
+	public function enforce_admin_two_factor_providers( $enabled, $user_id ) {
+		if ( ! $this->enabled( 'admin_2fa_enabled' ) || ! $this->enabled( 'admin_2fa_force_email' ) || ! $this->user_requires_admin_2fa( $user_id ) ) {
+			return $enabled;
+		}
+
+		$allowed = (array) $this->option( 'admin_2fa_providers' );
+		if ( in_array( 'Two_Factor_Email', $allowed, true ) && ! in_array( 'Two_Factor_Email', $enabled, true ) ) {
+			$enabled[] = 'Two_Factor_Email';
+		}
+
+		return array_values( array_unique( $enabled ) );
+	}
+
+	public function prefer_admin_totp_provider( $provider, $user_id ) {
+		if ( ! $this->enabled( 'admin_2fa_enabled' ) || ! $this->enabled( 'admin_2fa_prefer_totp' ) || ! $this->user_requires_admin_2fa( $user_id ) ) {
+			return $provider;
+		}
+
+		if ( ! class_exists( 'Two_Factor_Core' ) ) {
+			return $provider;
+		}
+
+		$available = Two_Factor_Core::get_available_providers_for_user( $user_id );
+		if ( is_array( $available ) && isset( $available['Two_Factor_Totp'] ) ) {
+			return 'Two_Factor_Totp';
+		}
+
+		return $provider;
+	}
+
+	private function user_requires_admin_2fa( $user_id ) {
+		$user = get_user_by( 'id', $user_id );
+		if ( ! $user ) {
+			return false;
+		}
+
+		return (bool) array_intersect( (array) $user->roles, (array) $this->option( 'admin_2fa_roles' ) );
+	}
+}
+
+ASW_Account_Security::instance();
