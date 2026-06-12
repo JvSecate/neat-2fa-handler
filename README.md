@@ -10,12 +10,14 @@ A WordPress plugin for email-based account confirmation and admin two-factor enf
 - **Checkout email confirmation** - require a code before order placement in classic checkout and WooCommerce Blocks checkout
 - **Guest checkout protection** - require a fresh billing email confirmation for every guest checkout
 - **Timed checkout window** - let logged-in customers reuse checkout confirmation for a configurable number of hours
+- **Registration password confirmation** - require customers to type the password twice before the email-code step
+- **Email-based password recovery** - replace logged-in account password changes with the lost-password email flow
 - **Admin 2FA enforcement** - require Two Factor for selected roles
 - **Two Factor integration** - supports authenticator app, email code, and backup code providers
 - **HTML email templates** - edit styled registration and checkout email templates from the settings page
 - **Customizable messaging** - edit email subject lines and HTML body content from the settings page
 - **Separate registration verification page** - users submit registration once, confirm the emailed code on the next page, then the account is created
-- **Inline checkout verification step** - customers submit checkout once to receive a code, then enter it before the order can be created
+- **Checkout verification modal** - customers submit checkout once to receive a code, then confirm it in a modal before the order can be created
 
 ---
 
@@ -61,7 +63,8 @@ The main settings cover:
 3. **Checkout window** - choose how long logged-in customer checkout confirmation stays valid; use `0` to require a fresh code every time
 4. **Code controls** - set code length, expiry, resend cooldown, and max attempts
 5. **Email templates** - edit the subject and HTML body for registration and checkout messages
-6. **Admin 2FA** - choose which roles must use Two Factor and which providers are allowed
+6. **Account password flow** - require password confirmation on registration and route password changes through email recovery
+7. **Admin 2FA** - choose which roles must use Two Factor and which providers are allowed
 
 ---
 
@@ -74,9 +77,11 @@ The plugin supports two public-facing confirmation flows:
 
 Registration is handled as a two-step flow. On the first registration submit, the plugin stores the pending registration briefly, sends a code, and redirects to a verification page. The account is created only after the code is accepted.
 
+When WooCommerce customer passwords are typed during registration, the plugin adds a confirm-password field and validates the match server-side before sending the email verification code.
+
 Checkout is blocked server-side. Classic checkout is protected through WooCommerce validation hooks. WooCommerce Blocks checkout is protected through the Store API checkout request, so an order cannot be created by bypassing the visible field.
 
-On the first checkout submit, the plugin sends a code and blocks order creation. Submitting again with the correct code continues checkout.
+On the first checkout submit, the plugin sends a code and blocks order creation. The checkout page opens a verification modal when the server requires confirmation. Submitting the correct code continues checkout. Logged-in customers inside the configured checkout confirmation window are allowed by the server and do not see the modal.
 
 Email bodies support HTML, so the default templates include styled sections, clear verification-code formatting, and fallback-friendly inline styles.
 
@@ -101,3 +106,17 @@ Supported provider labels include:
 - Backup codes
 
 If the Two Factor plugin is not active, the plugin still handles registration and checkout confirmation, but admin 2FA enforcement is unavailable.
+
+---
+
+## Account Password Flow
+
+WooCommerce already provides the lost-password email flow at the My Account lost-password endpoint. The plugin keeps these WooCommerce options aligned when WooCommerce is active:
+
+```text
+woocommerce_registration_generate_username=yes
+woocommerce_registration_generate_password=no
+woocommerce_myaccount_lost_password_endpoint=lost-password
+```
+
+WooCommerce does not provide a built-in setting to require password confirmation on registration or to disable logged-in account password changes. Neat2FA Handler adds those behaviors in code. The visible password-change fieldset is removed from the account details page, and password changes submitted manually through that form are blocked server-side.

@@ -3,14 +3,8 @@
 
 	var config = window.Neat2FAHandler || {};
 	var headerName = config.checkoutHeader || 'X-Neat-2FA-Code';
-
-	function checkoutRoot() {
-		return document.querySelector( '.wp-block-woocommerce-checkout, .wc-block-checkout' );
-	}
-
-	function currentCodeInput() {
-		return document.getElementById( 'asw-block-checkout-code' ) || document.getElementById( 'asw-checkout-code' );
-	}
+	var pendingCheckoutCode = '';
+	var lastCheckoutButton = null;
 
 	function checkoutRequestUrl( input ) {
 		if ( 'string' === typeof input ) {
@@ -28,42 +22,123 @@
 		return /\/wc\/store\/v1\/checkout(?:\?|$)/.test( checkoutRequestUrl( input ) );
 	}
 
-	function mountCheckoutCodeField() {
-		var root = checkoutRoot();
-		if ( ! root || currentCodeInput() ) {
-			return;
-		}
+	function sanitizeCode( value ) {
+		return ( value || '' ).replace( /[^0-9]/g, '' );
+	}
 
-		var panel = document.createElement( 'div' );
-		panel.className = 'asw-confirmation-step asw-checkout-confirmation';
-		panel.id = 'asw-block-checkout-confirmation';
-		panel.innerHTML =
-			'<h3></h3>' +
-			'<p></p>' +
-			'<p class="form-row form-row-wide">' +
-				'<label for="asw-block-checkout-code"></label>' +
-				'<input id="asw-block-checkout-code" class="input-text" type="text" inputmode="numeric" pattern="[0-9 ]*" autocomplete="one-time-code" value="">' +
-			'</p>';
-
-		panel.querySelector( 'h3' ).textContent = config.checkoutTitle || 'Billing email verification';
-		panel.querySelector( 'p' ).textContent = config.checkoutHelp || 'Click Place Order once to receive a verification code. Then enter the code here and click Place Order again.';
-		panel.querySelector( 'label' ).textContent = config.checkoutLabel || 'Verification code';
-
-		var anchor = document.querySelector( '[data-block-name="woocommerce/checkout-contact-information-block"]' ) ||
-			document.querySelector( '.wc-block-components-address-form' ) ||
-			root.firstElementChild;
-
-		if ( anchor && anchor.parentNode ) {
-			anchor.parentNode.insertBefore( panel, anchor.nextSibling );
-			return;
-		}
-
-		root.insertBefore( panel, root.firstChild );
+	function hiddenClassicCodeField() {
+		return document.getElementById( 'asw-checkout-code' );
 	}
 
 	function checkoutCode() {
-		var input = currentCodeInput();
-		return input ? input.value.replace( /[^0-9]/g, '' ) : '';
+		var field = hiddenClassicCodeField();
+		return pendingCheckoutCode || ( field ? sanitizeCode( field.value ) : '' );
+	}
+
+	function checkoutButton() {
+		return lastCheckoutButton ||
+			document.querySelector( '.wc-block-components-checkout-place-order-button' ) ||
+			document.querySelector( '.wc-block-checkout__actions_row button' ) ||
+			document.querySelector( '#place_order' ) ||
+			document.querySelector( 'button[name="woocommerce_checkout_place_order"]' );
+	}
+
+	function ensureCheckoutModal() {
+		var existing = document.getElementById( 'asw-checkout-modal' );
+		if ( existing ) {
+			return existing;
+		}
+
+		var modal = document.createElement( 'div' );
+		modal.className = 'asw-modal';
+		modal.id = 'asw-checkout-modal';
+		modal.hidden = true;
+		modal.innerHTML =
+			'<div class="asw-modal__overlay" data-asw-close></div>' +
+			'<div class="asw-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="asw-checkout-modal-title">' +
+				'<button type="button" class="asw-modal__close" data-asw-close aria-label=""></button>' +
+				'<h2 id="asw-checkout-modal-title"></h2>' +
+				'<p class="asw-modal__message"></p>' +
+				'<p class="asw-modal__notice" aria-live="polite"></p>' +
+				'<p class="form-row form-row-wide">' +
+					'<label for="asw-checkout-modal-code"></label>' +
+					'<input id="asw-checkout-modal-code" class="input-text" type="text" inputmode="numeric" pattern="[0-9 ]*" autocomplete="one-time-code" value="">' +
+				'</p>' +
+				'<p class="asw-modal__actions">' +
+					'<button type="button" class="button asw-checkout-verify"></button>' +
+				'</p>' +
+			'</div>';
+
+		modal.querySelector( '.asw-modal__close' ).textContent = 'x';
+		modal.querySelector( '.asw-modal__close' ).setAttribute( 'aria-label', config.checkoutClose || 'Close' );
+		modal.querySelector( 'h2' ).textContent = config.checkoutTitle || 'Billing email verification';
+		modal.querySelector( '.asw-modal__message' ).textContent = config.checkoutHelp || 'Enter the verification code sent to your billing email, then continue checkout.';
+		modal.querySelector( 'label' ).textContent = config.checkoutLabel || 'Verification code';
+		modal.querySelector( '.asw-checkout-verify' ).textContent = config.checkoutVerify || 'Continue checkout';
+
+		document.body.appendChild( modal );
+		return modal;
+	}
+
+	function openCheckoutModal( message ) {
+		var modal = ensureCheckoutModal();
+		var notice = modal.querySelector( '.asw-modal__notice' );
+		var input = modal.querySelector( '#asw-checkout-modal-code' );
+
+		notice.textContent = message || '';
+		input.value = pendingCheckoutCode || '';
+		modal.hidden = false;
+		window.setTimeout( function () {
+			input.focus();
+		}, 30 );
+	}
+
+	function closeCheckoutModal() {
+		var modal = document.getElementById( 'asw-checkout-modal' );
+		if ( modal ) {
+			modal.hidden = true;
+		}
+	}
+
+	function continueCheckoutFromModal() {
+		var modal = ensureCheckoutModal();
+		var input = modal.querySelector( '#asw-checkout-modal-code' );
+		var code = sanitizeCode( input.value );
+		var hiddenField = hiddenClassicCodeField();
+
+		if ( ! code ) {
+			modal.querySelector( '.asw-modal__notice' ).textContent = config.checkoutLabel || 'Verification code';
+			input.focus();
+			return;
+		}
+
+		pendingCheckoutCode = code;
+		if ( hiddenField ) {
+			hiddenField.value = code;
+		}
+
+		closeCheckoutModal();
+
+		var button = checkoutButton();
+		if ( button ) {
+			button.click();
+		}
+	}
+
+	function isNeatCheckoutError( data ) {
+		return data && 'string' === typeof data.code && 0 === data.code.indexOf( 'asw_' );
+	}
+
+	function maybeOpenModalFromResponse( response ) {
+		if ( ! response || response.ok ) {
+			return;
+		}
+
+		response.clone().json().then( function ( data ) {
+			if ( isNeatCheckoutError( data ) ) {
+				openCheckoutModal( data.message || '' );
+			}
+		} ).catch( function () {} );
 	}
 
 	function initFetchGuard() {
@@ -73,30 +148,127 @@
 
 		var originalFetch = window.fetch;
 		var guardedFetch = function ( input, init ) {
-			var code = checkoutCode();
-			if ( ! code || ! isCheckoutRequest( input ) ) {
-				return originalFetch.apply( this, arguments );
+			var isCheckout = isCheckoutRequest( input );
+			var code = isCheckout ? checkoutCode() : '';
+			var args = arguments;
+
+			if ( isCheckout && code ) {
+				var nextInit = Object.assign( {}, init || {} );
+				var headers = new Headers( nextInit.headers || ( input && input.headers ) || {} );
+				headers.set( headerName, code );
+				nextInit.headers = headers;
+				args = [ input, nextInit ];
 			}
 
-			var nextInit = Object.assign( {}, init || {} );
-			var headers = new Headers( nextInit.headers || ( input && input.headers ) || {} );
-			headers.set( headerName, code );
-			nextInit.headers = headers;
+			return originalFetch.apply( this, args ).then( function ( response ) {
+				if ( isCheckout ) {
+					maybeOpenModalFromResponse( response );
+				}
 
-			return originalFetch.call( this, input, nextInit );
+				return response;
+			} );
 		};
 
 		guardedFetch.__neat2faGuard = true;
 		window.fetch = guardedFetch;
 	}
 
-	function init() {
-		mountCheckoutCodeField();
-		initFetchGuard();
+	function watchCheckoutButtons() {
+		document.addEventListener( 'click', function ( event ) {
+			var button = event.target.closest( '.wc-block-components-checkout-place-order-button, .wc-block-checkout__actions_row button, #place_order, button[name="woocommerce_checkout_place_order"]' );
+			if ( button ) {
+				lastCheckoutButton = button;
+			}
+		}, true );
+	}
 
-		var root = checkoutRoot();
-		if ( root && window.MutationObserver ) {
-			new MutationObserver( mountCheckoutCodeField ).observe( root, { childList: true, subtree: true } );
+	function watchClassicCheckoutErrors() {
+		document.addEventListener( 'click', function ( event ) {
+			var close = event.target.closest( '[data-asw-close]' );
+			if ( close ) {
+				closeCheckoutModal();
+			}
+
+			var verify = event.target.closest( '.asw-checkout-verify' );
+			if ( verify ) {
+				continueCheckoutFromModal();
+			}
+		} );
+
+		document.addEventListener( 'keydown', function ( event ) {
+			if ( 'Enter' === event.key && event.target && 'asw-checkout-modal-code' === event.target.id ) {
+				event.preventDefault();
+				continueCheckoutFromModal();
+			}
+		} );
+
+		if ( window.jQuery ) {
+			window.jQuery( document.body ).on( 'checkout_error', function () {
+				var message = document.querySelector( '.woocommerce-error, .woocommerce-NoticeGroup-checkout .woocommerce-error' );
+				if ( message && /verification code|billing email|c[oó]digo|verifica/i.test( message.textContent ) ) {
+					openCheckoutModal( message.textContent.trim() );
+				}
+			} );
+		}
+	}
+
+	function accountPasswordFieldset() {
+		var input = document.querySelector( 'input[name="password_current"], input[name="password_1"], input[name="password_2"]' );
+		return input ? input.closest( 'fieldset' ) : null;
+	}
+
+	function ensureRecoveryPanel( fieldset ) {
+		var form = document.querySelector( 'form.woocommerce-EditAccountForm, form.edit-account' );
+		if ( ! form || form.querySelector( '.asw-password-recovery-panel' ) ) {
+			return;
+		}
+
+		var panel = document.createElement( 'div' );
+		panel.className = 'asw-password-recovery-panel';
+		panel.innerHTML =
+			'<h3></h3>' +
+			'<p></p>' +
+			'<p><a class="button" href=""></a></p>';
+
+		panel.querySelector( 'h3' ).textContent = config.recoveryTitle || 'Password changes use email recovery';
+		panel.querySelector( 'p' ).textContent = config.recoveryHelp || 'Use the password recovery email flow to choose a new password securely.';
+		panel.querySelector( 'a' ).textContent = config.recoveryLabel || 'Send password recovery email';
+		panel.querySelector( 'a' ).href = config.recoveryUrl || '/my-account/lost-password/';
+
+		if ( fieldset && fieldset.parentNode ) {
+			fieldset.parentNode.insertBefore( panel, fieldset );
+			return;
+		}
+
+		var submit = form.querySelector( 'button[type="submit"], input[type="submit"]' );
+		if ( submit && submit.parentNode ) {
+			submit.parentNode.insertBefore( panel, submit );
+			return;
+		}
+
+		form.appendChild( panel );
+	}
+
+	function removeAccountPasswordFields() {
+		var fieldset = accountPasswordFieldset();
+		if ( ! fieldset ) {
+			return;
+		}
+
+		ensureRecoveryPanel( fieldset );
+		fieldset.remove();
+	}
+
+	function init() {
+		ensureCheckoutModal();
+		initFetchGuard();
+		watchCheckoutButtons();
+		watchClassicCheckoutErrors();
+		removeAccountPasswordFields();
+
+		var accountForm = document.querySelector( 'form.woocommerce-EditAccountForm, form.edit-account' );
+		if ( accountForm && window.MutationObserver ) {
+			new MutationObserver( removeAccountPasswordFields ).observe( accountForm, { childList: true, subtree: true } );
 		}
 	}
 

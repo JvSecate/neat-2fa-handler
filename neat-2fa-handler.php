@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Neat2FA Handler
  * Description: Adds secure email confirmation for registration and checkout, plus admin 2FA controls integrated with the Two Factor plugin.
- * Version: 0.1.4
+ * Version: 0.1.6
  * Author: Jv Secate
  * Text Domain: neat-2fa-handler
  * Requires PHP: 7.4
@@ -14,12 +14,13 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 final class ASW_Account_Security {
-	const VERSION                 = '0.1.4';
-	const OPTION_KEY              = 'asw_account_security_options';
-	const REGISTRATION_CODE_NAME  = 'asw_registration_verification_code';
-	const CHECKOUT_CODE_NAME      = 'asw_checkout_verification_code';
-	const USER_EMAIL_CONFIRMED    = '_asw_email_confirmed_at';
-	const USER_CHECKOUT_CONFIRMED = '_asw_checkout_email_confirmed_at';
+	const VERSION                            = '0.1.6';
+	const OPTION_KEY                         = 'asw_account_security_options';
+	const REGISTRATION_CODE_NAME             = 'asw_registration_verification_code';
+	const REGISTRATION_PASSWORD_CONFIRM_NAME = 'asw_registration_password_confirm';
+	const CHECKOUT_CODE_NAME                 = 'asw_checkout_verification_code';
+	const USER_EMAIL_CONFIRMED               = '_asw_email_confirmed_at';
+	const USER_CHECKOUT_CONFIRMED            = '_asw_checkout_email_confirmed_at';
 
 	private static $instance = null;
 
@@ -44,11 +45,19 @@ final class ASW_Account_Security {
 	}
 
 	public function register_hooks() {
+		$this->ensure_account_flow_options();
+
 		if ( $this->enabled( 'registration_enabled' ) ) {
+			add_action( 'woocommerce_register_form', array( $this, 'render_registration_password_confirmation' ), 6 );
+			add_filter( 'woocommerce_registration_errors', array( $this, 'validate_registration_password_confirmation' ), 20, 3 );
 			add_action( 'wp_loaded', array( $this, 'maybe_start_registration_verification' ), 5 );
 			add_action( 'template_redirect', array( $this, 'maybe_render_registration_verification_page' ), 0 );
 			add_action( 'user_register', array( $this, 'mark_registered_user_confirmed' ) );
 		}
+
+		add_action( 'wp_loaded', array( $this, 'maybe_block_account_password_change_submission' ), 4 );
+		add_action( 'woocommerce_edit_account_form', array( $this, 'render_account_password_recovery_panel' ), 30 );
+		add_action( 'woocommerce_save_account_details_errors', array( $this, 'block_account_password_changes' ), 5, 2 );
 
 		add_action( 'woocommerce_checkout_after_customer_details', array( $this, 'render_checkout_fields' ) );
 		add_action( 'woocommerce_checkout_before_order_review', array( $this, 'render_checkout_fields' ) );
@@ -58,6 +67,19 @@ final class ASW_Account_Security {
 		add_filter( 'rest_pre_dispatch', array( $this, 'validate_store_api_checkout' ), 10, 3 );
 
 		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_frontend_assets' ) );
+	}
+
+	private function ensure_account_flow_options() {
+		if ( ! class_exists( 'WooCommerce' ) ) {
+			return;
+		}
+
+		update_option( 'woocommerce_registration_generate_username', 'yes' );
+		update_option( 'woocommerce_registration_generate_password', 'no' );
+
+		if ( '' === (string) get_option( 'woocommerce_myaccount_lost_password_endpoint', '' ) ) {
+			update_option( 'woocommerce_myaccount_lost_password_endpoint', 'lost-password' );
+		}
 	}
 
 	private function defaults() {
@@ -440,7 +462,7 @@ final class ASW_Account_Security {
 
 		wp_enqueue_style( 'neat-2fa-handler', plugins_url( 'assets/neat-2fa-handler.css', __FILE__ ), array(), self::VERSION );
 
-		if ( function_exists( 'is_checkout' ) && is_checkout() ) {
+		if ( $this->should_load_frontend_script() ) {
 			wp_enqueue_script( 'neat-2fa-handler', plugins_url( 'assets/neat-2fa-handler.js', __FILE__ ), array(), self::VERSION, true );
 			wp_localize_script(
 				'neat-2fa-handler',
@@ -448,11 +470,25 @@ final class ASW_Account_Security {
 				array(
 					'checkoutHeader' => 'X-Neat-2FA-Code',
 					'checkoutTitle'  => __( 'Billing email verification', 'neat-2fa-handler' ),
-					'checkoutHelp'   => __( 'Click Place Order once to receive a verification code. Then enter the code here and click Place Order again.', 'neat-2fa-handler' ),
+					'checkoutHelp'   => __( 'Enter the verification code sent to your billing email, then continue checkout.', 'neat-2fa-handler' ),
 					'checkoutLabel'  => __( 'Verification code', 'neat-2fa-handler' ),
+					'checkoutVerify' => __( 'Continue checkout', 'neat-2fa-handler' ),
+					'checkoutClose'  => __( 'Close', 'neat-2fa-handler' ),
+					'recoveryTitle'  => __( 'Password changes use email recovery', 'neat-2fa-handler' ),
+					'recoveryHelp'   => __( 'Use the password recovery email flow to choose a new password securely.', 'neat-2fa-handler' ),
+					'recoveryLabel'  => __( 'Send password recovery email', 'neat-2fa-handler' ),
+					'recoveryUrl'    => $this->lost_password_url(),
 				)
 			);
 		}
+	}
+
+	private function should_load_frontend_script() {
+		if ( function_exists( 'is_checkout' ) && is_checkout() ) {
+			return true;
+		}
+
+		return function_exists( 'is_account_page' ) && is_account_page();
 	}
 
 	private function should_load_frontend_assets() {
@@ -470,6 +506,92 @@ final class ASW_Account_Security {
 
 		global $pagenow;
 		return $this->enabled( 'registration_enabled' ) && 'wp-login.php' === $pagenow;
+	}
+
+	public function render_registration_password_confirmation() {
+		if ( 'yes' === get_option( 'woocommerce_registration_generate_password' ) ) {
+			return;
+		}
+		?>
+		<p class="woocommerce-form-row woocommerce-form-row--wide form-row form-row-wide asw-password-confirm-row">
+			<label for="asw-registration-password-confirm"><?php esc_html_e( 'Confirm password', 'neat-2fa-handler' ); ?>&nbsp;<span class="required">*</span></label>
+			<input id="asw-registration-password-confirm" class="woocommerce-Input woocommerce-Input--text input-text" type="password" name="<?php echo esc_attr( self::REGISTRATION_PASSWORD_CONFIRM_NAME ); ?>" autocomplete="new-password" required>
+		</p>
+		<?php
+	}
+
+	public function validate_registration_password_confirmation( $errors, $username, $email ) {
+		if ( 'yes' === get_option( 'woocommerce_registration_generate_password' ) ) {
+			return $errors;
+		}
+
+		$password = isset( $_POST['password'] ) ? (string) wp_unslash( $_POST['password'] ) : '';
+		$confirm  = isset( $_POST[ self::REGISTRATION_PASSWORD_CONFIRM_NAME ] ) ? (string) wp_unslash( $_POST[ self::REGISTRATION_PASSWORD_CONFIRM_NAME ] ) : '';
+
+		if ( '' === $password ) {
+			return $errors;
+		}
+
+		if ( '' === $confirm ) {
+			$errors->add( 'asw_password_confirmation_required', __( 'Please confirm your password.', 'neat-2fa-handler' ) );
+			return $errors;
+		}
+
+		if ( ! hash_equals( $password, $confirm ) ) {
+			$errors->add( 'asw_password_confirmation_mismatch', __( 'The password confirmation does not match.', 'neat-2fa-handler' ) );
+		}
+
+		return $errors;
+	}
+
+	public function render_account_password_recovery_panel() {
+		if ( ! is_user_logged_in() ) {
+			return;
+		}
+		?>
+		<div class="asw-password-recovery-panel">
+			<h3><?php esc_html_e( 'Password changes use email recovery', 'neat-2fa-handler' ); ?></h3>
+			<p><?php esc_html_e( 'For security, use the password recovery email flow to choose a new password.', 'neat-2fa-handler' ); ?></p>
+			<p><a class="button" href="<?php echo esc_url( $this->lost_password_url() ); ?>"><?php esc_html_e( 'Send password recovery email', 'neat-2fa-handler' ); ?></a></p>
+		</div>
+		<?php
+	}
+
+	public function maybe_block_account_password_change_submission() {
+		if ( empty( $_POST['save_account_details'] ) || ! $this->account_password_change_was_submitted() ) {
+			return;
+		}
+
+		if ( function_exists( 'wc_add_notice' ) ) {
+			wc_add_notice( $this->password_recovery_required_message(), 'error' );
+		}
+
+		wp_safe_redirect( $this->lost_password_url() );
+		exit;
+	}
+
+	public function block_account_password_changes( $errors, $user ) {
+		if ( $this->account_password_change_was_submitted() ) {
+			$errors->add( 'asw_password_recovery_required', $this->password_recovery_required_message() );
+		}
+	}
+
+	private function account_password_change_was_submitted() {
+		foreach ( array( 'password_current', 'password_1', 'password_2' ) as $field ) {
+			if ( ! empty( $_POST[ $field ] ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private function password_recovery_required_message() {
+		return sprintf(
+			/* translators: %s: password recovery URL */
+			__( 'Password changes are handled by email recovery. Please use the password recovery page: %s', 'neat-2fa-handler' ),
+			esc_url( $this->lost_password_url() )
+		);
 	}
 
 	public function maybe_start_registration_verification() {
@@ -749,6 +871,18 @@ final class ASW_Account_Security {
 		return function_exists( 'wc_get_page_permalink' ) ? wc_get_page_permalink( 'myaccount' ) : home_url( '/' );
 	}
 
+	private function lost_password_url() {
+		if ( function_exists( 'wc_get_account_endpoint_url' ) ) {
+			return wc_get_account_endpoint_url( 'lost-password' );
+		}
+
+		if ( function_exists( 'wc_lostpassword_url' ) ) {
+			return wc_lostpassword_url();
+		}
+
+		return wp_lostpassword_url();
+	}
+
 	public function render_checkout_fields() {
 		static $rendered = false;
 
@@ -758,14 +892,7 @@ final class ASW_Account_Security {
 
 		$rendered = true;
 		?>
-		<div class="asw-confirmation-step asw-checkout-confirmation">
-			<h3><?php esc_html_e( 'Billing email verification', 'neat-2fa-handler' ); ?></h3>
-			<p><?php esc_html_e( 'Click Place order to receive a verification code. Then enter the code here and click Place order again to continue.', 'neat-2fa-handler' ); ?></p>
-			<p class="form-row form-row-wide">
-				<label for="asw-checkout-code"><?php esc_html_e( 'Verification code', 'neat-2fa-handler' ); ?></label>
-				<input id="asw-checkout-code" class="input-text" type="text" inputmode="numeric" pattern="[0-9 ]*" autocomplete="one-time-code" name="<?php echo esc_attr( self::CHECKOUT_CODE_NAME ); ?>" value="">
-			</p>
-		</div>
+		<input id="asw-checkout-code" type="hidden" name="<?php echo esc_attr( self::CHECKOUT_CODE_NAME ); ?>" value="">
 		<?php
 	}
 
@@ -1050,7 +1177,7 @@ final class ASW_Account_Security {
 
 	private function confirmation_sent_message( $context ) {
 		if ( 'checkout' === $context ) {
-			return __( 'We sent a verification code to your billing email. Enter it in the billing email verification section, then click Place order again.', 'neat-2fa-handler' );
+			return __( 'We sent a verification code to your billing email. Enter it in the verification window to continue checkout.', 'neat-2fa-handler' );
 		}
 
 		return __( 'We sent a verification code to your email. Enter it below and submit the form again to create your account.', 'neat-2fa-handler' );
@@ -1058,7 +1185,7 @@ final class ASW_Account_Security {
 
 	private function confirmation_pending_message( $context ) {
 		if ( 'checkout' === $context ) {
-			return __( 'Enter the verification code sent to your billing email before placing the order.', 'neat-2fa-handler' );
+			return __( 'Enter the verification code sent to your billing email in the verification window before placing the order.', 'neat-2fa-handler' );
 		}
 
 		return __( 'Enter the verification code sent to your email before creating your account.', 'neat-2fa-handler' );
