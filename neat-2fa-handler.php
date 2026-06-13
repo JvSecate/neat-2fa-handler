@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Neat2FA Handler
  * Description: Adds secure email confirmation for registration and checkout, plus admin 2FA controls integrated with the Two Factor plugin.
- * Version: 0.2.0
+ * Version: 0.2.1
  * Author: Jv Secate
  * Text Domain: neat-2fa-handler
  * Requires PHP: 7.4
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 final class ASW_Account_Security {
-	const VERSION                            = '0.2.0';
+	const VERSION                            = '0.2.1';
 	const OPTION_KEY                         = 'asw_account_security_options';
 	const REGISTRATION_CODE_NAME             = 'asw_registration_verification_code';
 	const REGISTRATION_PASSWORD_CONFIRM_NAME = 'asw_registration_password_confirm';
@@ -473,20 +473,43 @@ final class ASW_Account_Security {
 			wp_localize_script(
 				'neat-2fa-handler',
 				'Neat2FAHandler',
-				array(
-					'checkoutHeader' => 'X-Neat-2FA-Code',
-					'checkoutTitle'  => __( 'Billing email verification', 'neat-2fa-handler' ),
-					'checkoutHelp'   => __( 'Enter the verification code sent to your billing email, then continue checkout.', 'neat-2fa-handler' ),
-					'checkoutLabel'  => __( 'Verification code', 'neat-2fa-handler' ),
-					'checkoutVerify' => __( 'Continue checkout', 'neat-2fa-handler' ),
-					'checkoutClose'  => __( 'Close', 'neat-2fa-handler' ),
-					'recoveryTitle'  => __( 'Password changes use email recovery', 'neat-2fa-handler' ),
-					'recoveryHelp'   => __( 'Use the password recovery email flow to choose a new password securely.', 'neat-2fa-handler' ),
-					'recoveryLabel'  => __( 'Send password recovery email', 'neat-2fa-handler' ),
-					'recoveryUrl'    => $this->lost_password_url(),
-				)
+				$this->frontend_script_data()
 			);
 		}
+	}
+
+	private function frontend_script_data() {
+		return array_merge(
+			$this->frontend_texts(),
+			array(
+				'checkoutHeader' => 'X-Neat-2FA-Code',
+				'recoveryUrl'    => $this->lost_password_url(),
+			)
+		);
+	}
+
+	private function frontend_texts() {
+		$defaults = array(
+			'checkoutTitle'  => __( 'Confirm email', 'neat-2fa-handler' ),
+			'checkoutHelp'   => __( 'Enter the email code.', 'neat-2fa-handler' ),
+			'checkoutLabel'  => __( 'Code', 'neat-2fa-handler' ),
+			'checkoutVerify' => __( 'Continue', 'neat-2fa-handler' ),
+			'checkoutClose'  => __( 'Close', 'neat-2fa-handler' ),
+			'recoveryTitle'  => __( 'Recover password', 'neat-2fa-handler' ),
+			'recoveryHelp'   => '',
+			'recoveryLabel'  => __( 'Recover password', 'neat-2fa-handler' ),
+		);
+
+		/**
+		 * Lets themes replace the small default front-end strings.
+		 *
+		 * Expected keys: checkoutTitle, checkoutHelp, checkoutLabel,
+		 * checkoutVerify, checkoutClose, recoveryTitle, recoveryHelp,
+		 * recoveryLabel.
+		 */
+		$texts = apply_filters( 'neat_2fa_handler_frontend_texts', $defaults );
+
+		return is_array( $texts ) ? wp_parse_args( $texts, $defaults ) : $defaults;
 	}
 
 	private function should_load_frontend_script() {
@@ -554,11 +577,21 @@ final class ASW_Account_Security {
 		if ( ! is_user_logged_in() ) {
 			return;
 		}
+
+		if ( ! apply_filters( 'neat_2fa_handler_render_password_recovery_panel', true ) ) {
+			return;
+		}
+
+		$texts = $this->frontend_texts();
 		?>
 		<div class="asw-password-recovery-panel">
-			<h3><?php esc_html_e( 'Password changes use email recovery', 'neat-2fa-handler' ); ?></h3>
-			<p><?php esc_html_e( 'For security, use the password recovery email flow to choose a new password.', 'neat-2fa-handler' ); ?></p>
-			<p><a class="button" href="<?php echo esc_url( $this->lost_password_url() ); ?>"><?php esc_html_e( 'Send password recovery email', 'neat-2fa-handler' ); ?></a></p>
+			<?php if ( '' !== (string) $texts['recoveryTitle'] ) : ?>
+				<h3><?php echo esc_html( $texts['recoveryTitle'] ); ?></h3>
+			<?php endif; ?>
+			<?php if ( '' !== (string) $texts['recoveryHelp'] ) : ?>
+				<p><?php echo esc_html( $texts['recoveryHelp'] ); ?></p>
+			<?php endif; ?>
+			<p><a class="button" href="<?php echo esc_url( $this->lost_password_url() ); ?>"><?php echo esc_html( $texts['recoveryLabel'] ); ?></a></p>
 		</div>
 		<?php
 	}
@@ -596,7 +629,7 @@ final class ASW_Account_Security {
 	private function password_recovery_required_message() {
 		return sprintf(
 			/* translators: %s: password recovery URL */
-			__( 'Password changes are handled by email recovery. Please use the password recovery page: %s', 'neat-2fa-handler' ),
+			__( 'Use password recovery: %s', 'neat-2fa-handler' ),
 			esc_url( $this->lost_password_url() )
 		);
 	}
@@ -689,10 +722,10 @@ final class ASW_Account_Security {
 			<section class="asw-verification-page" aria-labelledby="asw-registration-verification-title">
 				<h1 id="asw-registration-verification-title"><?php esc_html_e( 'Confirm your email', 'neat-2fa-handler' ); ?></h1>
 				<?php if ( ! $pending ) : ?>
-					<p><?php esc_html_e( 'This verification session expired. Please start registration again.', 'neat-2fa-handler' ); ?></p>
+					<p><?php esc_html_e( 'Verification expired.', 'neat-2fa-handler' ); ?></p>
 					<p><a class="button" href="<?php echo esc_url( $this->account_url() ); ?>"><?php esc_html_e( 'Back to registration', 'neat-2fa-handler' ); ?></a></p>
 				<?php else : ?>
-					<p><?php echo esc_html( sprintf( __( 'We sent a verification code to %s. Enter it below to create your account.', 'neat-2fa-handler' ), $pending['email'] ) ); ?></p>
+					<p><?php echo esc_html( sprintf( __( 'Code sent to %s.', 'neat-2fa-handler' ), $pending['email'] ) ); ?></p>
 					<?php if ( is_wp_error( $error ) ) : ?>
 						<div class="woocommerce-error" role="alert"><?php echo esc_html( $error->get_error_message() ); ?></div>
 					<?php endif; ?>
@@ -1206,18 +1239,18 @@ final class ASW_Account_Security {
 
 	private function confirmation_sent_message( $context ) {
 		if ( 'checkout' === $context ) {
-			return __( 'We sent a verification code to your billing email. Enter it in the verification window to continue checkout.', 'neat-2fa-handler' );
+			return __( 'Email code sent.', 'neat-2fa-handler' );
 		}
 
-		return __( 'We sent a verification code to your email. Enter it below and submit the form again to create your account.', 'neat-2fa-handler' );
+		return __( 'Email code sent.', 'neat-2fa-handler' );
 	}
 
 	private function confirmation_pending_message( $context ) {
 		if ( 'checkout' === $context ) {
-			return __( 'Enter the verification code sent to your billing email in the verification window before placing the order.', 'neat-2fa-handler' );
+			return __( 'Enter the email code.', 'neat-2fa-handler' );
 		}
 
-		return __( 'Enter the verification code sent to your email before creating your account.', 'neat-2fa-handler' );
+		return __( 'Enter the email code.', 'neat-2fa-handler' );
 	}
 
 	private function email_key( $context, $email ) {

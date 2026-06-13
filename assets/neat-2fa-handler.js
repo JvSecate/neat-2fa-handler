@@ -78,10 +78,10 @@
 
 		modal.querySelector( '.asw-modal__close' ).textContent = 'x';
 		modal.querySelector( '.asw-modal__close' ).setAttribute( 'aria-label', config.checkoutClose || 'Close' );
-		modal.querySelector( 'h2' ).textContent = config.checkoutTitle || 'Billing email verification';
-		modal.querySelector( '.asw-modal__message' ).textContent = config.checkoutHelp || 'Enter the verification code sent to your billing email, then continue checkout.';
-		modal.querySelector( 'label' ).textContent = config.checkoutLabel || 'Verification code';
-		modal.querySelector( '.asw-checkout-verify' ).textContent = config.checkoutVerify || 'Continue checkout';
+		modal.querySelector( 'h2' ).textContent = config.checkoutTitle || 'Confirm email';
+		modal.querySelector( '.asw-modal__message' ).textContent = config.checkoutHelp || 'Enter the email code.';
+		modal.querySelector( 'label' ).textContent = config.checkoutLabel || 'Code';
+		modal.querySelector( '.asw-checkout-verify' ).textContent = config.checkoutVerify || 'Continue';
 
 		document.body.appendChild( modal );
 		return modal;
@@ -114,7 +114,7 @@
 		var hiddenField = hiddenClassicCodeField();
 
 		if ( ! code ) {
-			modal.querySelector( '.asw-modal__notice' ).textContent = config.checkoutLabel || 'Verification code';
+			modal.querySelector( '.asw-modal__notice' ).textContent = config.checkoutLabel || 'Code';
 			input.focus();
 			return;
 		}
@@ -237,10 +237,13 @@
 			'<p></p>' +
 			'<p><a class="button" href=""></a></p>';
 
-		panel.querySelector( 'h3' ).textContent = config.recoveryTitle || 'Password changes use email recovery';
-		panel.querySelector( 'p' ).textContent = config.recoveryHelp || 'Use the password recovery email flow to choose a new password securely.';
-		panel.querySelector( 'a' ).textContent = config.recoveryLabel || 'Send password recovery email';
+		panel.querySelector( 'h3' ).textContent = config.recoveryTitle || 'Recover password';
+		panel.querySelector( 'p' ).textContent = config.recoveryHelp || '';
+		panel.querySelector( 'a' ).textContent = config.recoveryLabel || 'Recover password';
 		panel.querySelector( 'a' ).href = config.recoveryUrl || '/my-account/lost-password/';
+		if ( ! panel.querySelector( 'p' ).textContent ) {
+			panel.querySelector( 'p' ).remove();
+		}
 
 		if ( fieldset && fieldset.parentNode ) {
 			fieldset.parentNode.insertBefore( panel, fieldset );
